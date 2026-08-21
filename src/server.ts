@@ -9,7 +9,11 @@ const json = (response: ServerResponse, status: number, value: unknown): void =>
   response.end(JSON.stringify(value));
 };
 
-const errorMessage = (error: unknown): string => error instanceof Error ? error.message.replace(/[A-Za-z]:\\[^\s]+/g, "[configured path]") : "Unexpected server error.";
+const errorMessage = (error: unknown): string => error instanceof Error
+  ? error.message
+    .replace(/[A-Za-z]:[\\/][^\s'"<>]+/g, "[configured path]")
+    .replace(/(?:\/[^\s'"<>]+){2,}/g, "[configured path]")
+  : "Unexpected server error.";
 
 const readJson = async (request: IncomingMessage): Promise<Json> => {
   const chunks: Buffer[] = [];
@@ -60,6 +64,17 @@ export const createMemoryCenterServer = (center: MemoryCenter): Server => create
     if (method === "GET" && path === "/api/audit") return json(response, 200, (await center.state()).audit.slice().reverse());
     if (method === "GET" && path === "/api/settings") return json(response, 200, (await center.state()).settings);
     if (method === "GET" && /^\/api\/native\/(user|memory)$/.test(path)) return json(response, 200, await center.nativeMemoryView(path.endsWith("/user") ? "user" : "memory"));
+    if (method === "GET" && /^\/api\/memories\/[^/]+\/detail$/.test(path)) {
+      const memoryId = decodeURIComponent(path.split("/")[3]);
+      const state = await center.state();
+      const memory = state.memories.find((item) => item.id === memoryId);
+      if (!memory) return json(response, 404, { error: "Memory not found." });
+      return json(response, 200, {
+        memory,
+        timeline: state.timeline.filter((item) => item.memoryId === memoryId).slice().reverse(),
+        recalls: state.recalls.filter((item) => item.memoryId === memoryId).slice().reverse(),
+      });
+    }
     if (method === "GET" && /^\/api\/memories\/[^/]+$/.test(path)) {
       const memory = await center.getMemory(decodeURIComponent(path.split("/").at(-1)!));
       return memory ? json(response, 200, memory) : json(response, 404, { error: "Memory not found." });

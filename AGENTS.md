@@ -4,7 +4,7 @@
 
 本仓库用于开发 **Hermes B1ack Dream**：一个可独立安装、长期维护的 Hermes Memory Provider 插件及其 WebUI 管理中心。文档或代码中的 “Memory Center” 是其独立记忆子系统的技术名称，不是产品展示名称。
 
-`Hermes_Memory_Center_Codex_Prompt_v2.md` 是当前产品规格的唯一权威来源。开始任何功能设计、实现、测试或文档更新前，必须先阅读与当前变更有关的规格章节；实现与规格冲突时，以该文档第 55 节的两条最高产品定义为准。
+`docs/Hermes_Memory_Center_Codex_Prompt_v2.md` 是当前产品规格的唯一权威来源。开始任何功能设计、实现、测试或文档更新前，必须先阅读与当前变更有关的规格章节；实现与规格冲突时，以该文档第 55 节的两条最高产品定义为准。阶段性正式 Hermes 适配轮次另以 `docs/Hermes_B1ack_Dream_Formal_Hermes_Plugin_Round_Prompt.md` 为直接实施要求，但不得突破前述长期边界。
 
 本仓库不是 Hermes 核心仓库。必须通过可配置的适配层和安装说明对接 Hermes，不得假定 Hermes 源码存在于本仓库或某个固定路径。
 

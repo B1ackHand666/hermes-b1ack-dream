@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export type MemoryState = "recent" | "observed" | "long_term" | "pinned" | "archived";
 export type LifecycleState = "active" | "stable" | "dormant" | "expired";
@@ -19,10 +19,11 @@ export type Actor = "user" | "capture" | "light_dream" | "rem_dream" | "deep_dre
 export type DreamStage = "light" | "rem" | "deep";
 export type InboxKind = "promotion" | "conflict" | "pinned_conflict";
 export type BoundaryScope = "memory" | "topic" | "type" | "rule";
+export type RecallContextStatus = "selected" | "injected" | "not_injected" | "unknown";
 
 export interface ConversationMessage {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool" | "function";
   content: string;
   createdAt: string;
 }
@@ -85,6 +86,10 @@ export interface MemoryItem {
     expiresAt: string;
   };
   archivedAt?: string;
+  /** State to restore after an explicit archive; absent only for legacy data. */
+  archivedFromState?: Exclude<MemoryState, "archived">;
+  /** Evidence count that the user has already resolved for a conflicting memory. */
+  resolvedConflictEvidence?: Record<string, number>;
 }
 
 export interface TimelineEvent {
@@ -116,7 +121,8 @@ export interface RecallRecord {
   memoryState: MemoryState;
   score: number;
   reason: string;
-  includedInContext: boolean;
+  /** Selected means recall found it; injected is only recorded when the host confirms injection. */
+  contextStatus: RecallContextStatus;
 }
 
 export interface InboxItem {

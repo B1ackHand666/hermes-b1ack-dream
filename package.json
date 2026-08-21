@@ -9,10 +9,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:plugin": "tsc -p tsconfig.plugin.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "benchmark": "npm run build && node scripts/benchmark_memory_center.mjs",
+    "test:hermes": "npm run build:plugin && python scripts/test_hermes_provider.py",
     "start": "node dist/src/index.js",
     "dev": "node --watch --experimental-strip-types src/index.ts",
-    "test": "npm run build && node --test dist/tests/**/*.test.js"
+    "test": "npm run build && npm run build:plugin && node --test dist/tests/**/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

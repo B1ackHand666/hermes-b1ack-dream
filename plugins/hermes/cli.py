@@ -1,0 +1,55 @@
+"""CLI entry points discovered by Hermes only while b1ack-dream is active."""
+
+from __future__ import annotations
+
+import json
+import webbrowser
+from pathlib import Path
+
+
+def _home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home())
+    except Exception:
+        import os
+        return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+
+
+def command(args) -> None:
+    data_dir = _home() / "b1ack-dream"
+    subcommand = getattr(args, "b1ack_dream_command", None) or "status"
+    if subcommand == "status":
+        config = data_dir / "config.json"
+        runtime = data_dir / "runtime.json"
+        print(f"B1ack Dream data: {data_dir}")
+        print(f"Configuration: {'configured' if config.exists() else 'defaults (run hermes memory setup)'}")
+        if runtime.exists():
+            state = json.loads(runtime.read_text(encoding="utf-8"))
+            print(f"WebUI: {state.get('web_ui') or 'disabled'}")
+        else:
+            print("WebUI: start Hermes with b1ack-dream enabled first")
+        return
+    if subcommand == "ui":
+        runtime = data_dir / "runtime.json"
+        if not runtime.exists():
+            print("B1ack Dream WebUI is not running. Start Hermes with b1ack-dream enabled.")
+            return
+        state = json.loads(runtime.read_text(encoding="utf-8"))
+        web = state.get("web_ui") or {}
+        url = f"http://{web.get('host', '127.0.0.1')}:{web.get('port')}"
+        print(url)
+        if getattr(args, "open", False):
+            webbrowser.open(url)
+        return
+    if subcommand == "dream":
+        print("Dream runs automatically at primary-session end. Use the WebUI for a manual Dream while Hermes is running.")
+
+
+def register_cli(subparser) -> None:
+    subs = subparser.add_subparsers(dest="b1ack_dream_command")
+    subs.add_parser("status", help="Show B1ack Dream profile status")
+    ui = subs.add_parser("ui", help="Print the running local WebUI URL")
+    ui.add_argument("--open", action="store_true", help="Open the local WebUI in a browser")
+    subs.add_parser("dream", help="Explain how to run a manual Dream")
+    subparser.set_defaults(func=command)

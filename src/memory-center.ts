@@ -38,6 +38,17 @@ export interface CaptureInput {
   at?: string;
 }
 
+/** A completed Hermes turn. Tool output is archived as provenance only, never profiled as user memory. */
+export interface CompletedTurnInput {
+  conversationId: string;
+  userContent: string;
+  assistantContent: string;
+  sourceId: string;
+  title?: string;
+  messages?: Array<{ role?: string; content?: unknown }>;
+  at?: string;
+}
+
 export interface RecallResult {
   context: string;
   memories: Array<{ memory: MemoryItem; score: number; reason: string; recordId: string }>;
@@ -66,12 +77,27 @@ const DAY = 24 * 60 * 60 * 1000;
 const now = (): string => new Date().toISOString();
 const id = (): string => randomUUID();
 const normalize = (value: string): string => value.toLocaleLowerCase().replace(/\s+/g, " ").trim();
-const words = (value: string): string[] => normalize(value).match(/[\p{L}\p{N}_-]{2,}/gu) ?? [];
+const semanticAliases: Array<{ canonical: string; terms: string[] }> = [
+  { canonical: "公务员考试", terms: ["国考", "公务员考试", "行测", "申论", "备考公务员"] },
+  { canonical: "详细解释", terms: ["详细", "展开讲", "展开说明", "复杂问题", "深入分析", "讲清楚"] },
+  { canonical: "简洁回答", terms: ["简短", "简洁", "言简意赅", "少说", "精炼"] },
+];
+const words = (value: string): string[] => {
+  const content = normalize(value);
+  const found = new Set(content.match(/[\p{L}\p{N}_-]{2,}/gu) ?? []);
+  for (const alias of semanticAliases) if (alias.terms.some((term) => content.includes(term))) found.add(alias.canonical);
+  for (const run of content.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let index = 0; index < run.length - 1; index += 1) found.add(run.slice(index, index + 2));
+  }
+  return [...found];
+};
 const unique = <T>(values: T[]): T[] => [...new Set(values)];
 const dateDaysFrom = (value: string, days: number): string => new Date(new Date(value).getTime() + days * DAY).toISOString();
 
 const typeFor = (text: string): MemoryType => {
   const content = normalize(text);
+  if (/(国考|公务员考试|行测|申论|备考)/.test(content)) return "goal";
+  if (/(详细|展开讲|展开说明|复杂问题|深入分析|讲清楚|简短|简洁|言简意赅|少说|精炼)/.test(content)) return "preference";
   if (/(喜欢|偏好|prefer|like|讨厌|不喜欢)/.test(content)) return "preference";
   if (/(目标|计划|准备|goal|plan|intend)/.test(content)) return "goal";
   if (/(项目|project|仓库|repo|开发)/.test(content)) return "project";
@@ -88,6 +114,9 @@ const titleFor = (text: string, fallbackType: MemoryType): string => {
 };
 
 const topicFor = (text: string): string => {
+  const content = normalize(text);
+  const alias = semanticAliases.find((candidate) => candidate.terms.some((term) => content.includes(term)));
+  if (alias) return alias.canonical;
   const terms = words(text).filter((word) => !new Set(["用户", "hermes", "memory", "center", "这个", "那个", "我们", "的是", "可以", "需要"]).has(word));
   return terms.slice(0, 5).join(" ") || normalize(text).slice(0, 40);
 };
@@ -138,18 +167,18 @@ export class MemoryCenter {
     const at = input.at ?? now();
     const message: ConversationMessage = { id: input.messageId ?? id(), role: "user", content: input.content, createdAt: at };
     const traces = this.extractTraces(input.conversationId, message);
-    if (traces.length === 0) return [];
 
     await this.store.transaction((state) => {
       this.upsertConversation(state, input.conversationId, input.title, message);
       for (const trace of traces) {
+        if (state.traces.some((existing) => existing.messageId === trace.messageId)) continue;
         if (this.isBlocked(state, trace)) {
           this.audit(state, "capture_blocked_by_boundary", "capture", "Memory Trace was rejected by a Memory Boundary.", undefined, input.conversationId, { topic: trace.topic, type: trace.type });
           continue;
         }
         state.traces.push(trace);
         const evidence = this.evidenceFrom(trace);
-        const matching = state.memories.find((memory) => memory.state !== "archived" && memory.topic === trace.topic && memory.type === trace.type);
+        const matching = state.memories.find((memory) => memory.state !== "archived" && this.sameTopic(memory, trace));
         if (matching) {
           this.addEvidence(matching, evidence);
           matching.lastReinforcedAt = at;
@@ -163,6 +192,35 @@ export class MemoryCenter {
         this.timeline(state, memory.id, "recent_created", "capture", "Created from a captured Memory Trace.", at);
         this.audit(state, "recent_created", "capture", `Created Recent memory “${memory.title}”.`, memory.id, input.conversationId);
       }
+    });
+    return traces;
+  }
+
+  /** Archive a full completed Hermes turn while profiling only user-authored content. */
+  async captureCompletedTurn(input: CompletedTurnInput): Promise<MemoryTrace[]> {
+    const at = input.at ?? now();
+    const messageId = `turn:${input.sourceId}`;
+    const traces = await this.capture({
+      conversationId: input.conversationId,
+      content: input.userContent,
+      messageId,
+      title: input.title,
+      at,
+    });
+    await this.store.transaction((state) => {
+      const assistant: ConversationMessage = { id: `${messageId}:assistant`, role: "assistant", content: input.assistantContent, createdAt: at };
+      this.upsertConversation(state, input.conversationId, input.title, assistant);
+      const toolMessages = (input.messages ?? []).filter((message): message is { role: "tool" | "function"; content?: unknown } => message.role === "tool" || message.role === "function");
+      for (const [index, tool] of toolMessages.entries()) {
+        const content = typeof tool.content === "string" ? tool.content : JSON.stringify(tool.content ?? null);
+        if (!content) continue;
+        // Hermes can provide the complete transcript. A deterministic id keeps
+        // already-seen tool provenance from being copied on every later turn.
+        const provenanceId = `provenance:${input.conversationId}:${tool.role}:${normalize(content).slice(0, 500)}`;
+        this.upsertConversation(state, input.conversationId, input.title, { id: provenanceId || `${messageId}:tool:${index}`, role: tool.role, content: content.slice(0, 5_000), createdAt: at });
+      }
+      const toolCount = toolMessages.length;
+      this.audit(state, "turn_archived", "capture", "Archived a completed Hermes turn; tool output was retained as provenance only.", undefined, input.conversationId, { sourceId: input.sourceId, toolMessageCount: toolCount });
     });
     return traces;
   }
@@ -219,7 +277,7 @@ export class MemoryCenter {
         this.timeline(state, memory.id, "demoted_to_recent", "user", "User marked this as recent rather than long-term.", at);
         this.audit(state, "observed_demoted", "user", `Demoted “${memory.title}” to Recent.`, memory.id);
       } else {
-        this.deleteFromState(state, memory, false, "User chose not to remember this candidate.", at);
+        this.deleteFromState(state, memory, "user", "User chose not to remember this candidate.", at);
       }
     });
   }
@@ -259,8 +317,9 @@ export class MemoryCenter {
   async archive(memoryId: string): Promise<void> {
     await this.store.transaction((state) => {
       const memory = this.requireMemory(state, memoryId);
-      if (memory.state === "pinned") throw new Error("Pinned memories cannot be automatically or manually archived without unpinning first.");
+      if (memory.state !== "long_term") throw new Error("Only Long-term memories can be archived; handle Recent or Observed through their lifecycle first.");
       const at = now();
+      memory.archivedFromState = memory.state;
       memory.state = "archived";
       memory.lifecycle = "dormant";
       memory.archivedAt = at;
@@ -275,9 +334,10 @@ export class MemoryCenter {
       const memory = this.requireMemory(state, memoryId);
       if (memory.state !== "archived") throw new Error("Only archived memories can be restored.");
       const at = now();
-      memory.state = "long_term";
-      memory.lifecycle = "stable";
+      memory.state = memory.archivedFromState ?? "long_term";
+      memory.lifecycle = memory.state === "recent" ? "active" : "stable";
       memory.archivedAt = undefined;
+      memory.archivedFromState = undefined;
       memory.updatedAt = at;
       this.timeline(state, memory.id, "restored", "user", "User restored this memory from archive.", at);
       this.audit(state, "memory_restored", "user", `Restored “${memory.title}”.`, memory.id);
@@ -294,7 +354,7 @@ export class MemoryCenter {
         state.boundaries.push(boundary);
         this.audit(state, "boundary_created", "user", `Created boundary for topic “${memory.topic}”.`, memory.id, undefined, { boundaryId: boundary.id });
       }
-      for (const target of targets) this.deleteFromState(state, target, false, "User deleted this Memory Center memory.", at);
+      for (const target of targets) this.deleteFromState(state, target, "user", "User deleted this Memory Center memory.", at);
       return targets.length;
     });
   }
@@ -355,13 +415,14 @@ export class MemoryCenter {
       const candidates = state.memories
         .filter((memory) => memory.state !== "archived")
         .filter((memory) => !this.isBlocked(state, { topic: memory.topic, type: memory.type, normalizedText: `${memory.title} ${memory.content}`, memoryId: memory.id }))
+        .filter((memory) => this.isRecallAllowed(memory, state.settings))
         .map((memory) => ({ memory, ...this.scoreRecall(memory, query) }))
-        .filter((candidate) => candidate.score > 0.05)
+        .filter((candidate) => candidate.score > this.recallThreshold(state.settings))
         .sort((a, b) => b.score - a.score || b.memory.updatedAt.localeCompare(a.memory.updatedAt))
         .slice(0, max);
       const at = now();
       const results = candidates.map(({ memory, score, reason }) => {
-        const record: RecallRecord = { id: id(), at, conversationId, query, memoryId: memory.id, memoryState: memory.state, score, reason, includedInContext: true };
+        const record: RecallRecord = { id: id(), at, conversationId, query, memoryId: memory.id, memoryState: memory.state, score, reason, contextStatus: "selected" };
         state.recalls.push(record);
         memory.recalledCount += 1;
         memory.lastRecalledAt = at;
@@ -377,12 +438,12 @@ export class MemoryCenter {
     });
   }
 
-  async markRecallOutcome(recordIds: string[], includedInContext: boolean): Promise<void> {
+  async markRecallOutcome(recordIds: string[], contextStatus: "injected" | "not_injected" | "unknown"): Promise<void> {
     await this.store.transaction((state) => {
       for (const record of state.recalls) {
         if (!recordIds.includes(record.id)) continue;
-        record.includedInContext = includedInContext;
-        this.audit(state, "recall_outcome_recorded", "system", `Recall context ${includedInContext ? "was" : "was not"} used in the final answer.`, record.memoryId, record.conversationId, { recordId: record.id });
+        record.contextStatus = contextStatus;
+        this.audit(state, "recall_outcome_recorded", "system", `Recall context status is ${contextStatus}.`, record.memoryId, record.conversationId, { recordId: record.id });
       }
     });
   }
@@ -403,10 +464,15 @@ export class MemoryCenter {
         memory.authority = "inferred";
         memory.observation = undefined;
       }
+      if (action === "keep_old" && inbox.conflictingMemoryId) {
+        memory.resolvedConflictEvidence ??= {};
+        memory.resolvedConflictEvidence[inbox.conflictingMemoryId] = memory.evidence.length;
+      }
       if (action === "use_new" && inbox.conflictingMemoryId) {
         const old = this.requireMemory(state, inbox.conflictingMemoryId);
         if (old.state !== "pinned" && old.authority !== "user_locked") this.archiveMemory(state, old, "user", "User chose newer conflicting information.", at);
         else throw new Error("Pinned or locked memory must be manually edited; it cannot be silently replaced.");
+        this.promote(state, memory, "user", "User chose this new memory over the prior conflicting memory.", at);
       }
       inbox.status = "resolved";
       this.audit(state, "inbox_resolved", "user", `Resolved Inbox item with “${action}”.`, memory.id, undefined, { inboxId });
@@ -445,7 +511,9 @@ export class MemoryCenter {
     const state = await this.store.read();
     const version = state.nativeMemoryHistory.find((item) => item.id === versionId && item.target === target);
     if (!version) throw new Error("Native memory version not found.");
-    await this.writeNativeMemory(target, version.previousContent, { confirmed, action: "write" });
+    // A history row represents the content after that user action. “恢复此版本”
+    // therefore restores nextContent; undoing a change is a separate future UX.
+    await this.writeNativeMemory(target, version.nextContent, { confirmed, action: "write" });
     await this.store.transaction((next) => {
       const latest = next.nativeMemoryHistory.at(-1);
       if (latest) latest.action = "restore";
@@ -521,6 +589,30 @@ export class MemoryCenter {
     });
   }
 
+  private sameTopic(memory: MemoryItem, trace: MemoryTrace): boolean {
+    if (memory.topic === trace.topic) return true;
+    const left = new Set(words(`${memory.topic} ${memory.content}`));
+    const right = new Set(words(`${trace.topic} ${trace.normalizedText}`));
+    const overlap = [...left].filter((term) => right.has(term)).length;
+    return overlap >= 2 || [...left].some((term) => semanticAliases.some((alias) => alias.canonical === term && right.has(alias.canonical)));
+  }
+
+  private observationThreshold(memory: MemoryItem, settings: Settings): number {
+    const base = memory.type === "project" || memory.type === "goal" ? 2 : 3;
+    if (settings.memoryStyle === "conservative") return base + 1;
+    if (settings.memoryStyle === "active") return Math.max(1, base - 1);
+    return base;
+  }
+
+  private isRecallAllowed(memory: MemoryItem, settings: Settings): boolean {
+    if (settings.memoryStyle !== "conservative") return true;
+    return memory.state !== "recent" && memory.state !== "observed";
+  }
+
+  private recallThreshold(settings: Settings): number {
+    return settings.memoryStyle === "conservative" ? 0.1 : settings.memoryStyle === "active" ? 0.025 : 0.05;
+  }
+
   private runDreamStage(state: MemoryCenterState, runId: string, stage: "light" | "rem" | "deep"): DreamEntry {
     const at = now();
     const actions: string[] = [];
@@ -540,7 +632,7 @@ export class MemoryCenter {
       for (const memory of state.memories.filter((item) => item.state === "recent")) {
         if (this.isBlocked(state, { topic: memory.topic, type: memory.type, normalizedText: memory.content, memoryId: memory.id })) continue;
         const evidenceDays = unique(memory.evidence.map((evidence) => evidence.observedAt.slice(0, 10))).length;
-        const threshold = memory.type === "project" || memory.type === "goal" ? 2 : 3;
+        const threshold = this.observationThreshold(memory, state.settings);
         if (memory.evidence.length >= threshold || (memory.evidence.length >= 2 && evidenceDays >= 2) || memory.relatedTraceIds.some((traceId) => state.traces.find((trace) => trace.id === traceId)?.explicit)) {
           memory.state = "observed";
           memory.authority = "observed";
@@ -573,7 +665,7 @@ export class MemoryCenter {
           actions.push(`“${memory.title}”与既有记忆冲突，已进入待确认。`);
           continue;
         }
-        if (state.settings.autoPromoteObserved) {
+        if (state.settings.autoPromoteObserved || state.settings.memoryStyle === "active") {
           this.promote(state, memory, "deep_dream", "Deep Dream found stable cross-day evidence.", at);
           actions.push(`将“${memory.title}”晋升为长期记忆。`);
         } else {
@@ -593,7 +685,8 @@ export class MemoryCenter {
   }
 
   private observation(memory: MemoryItem, settings: Settings, at: string, reason: string): NonNullable<MemoryItem["observation"]> {
-    return { reason, appearances: memory.evidence.length, distinctDays: unique(memory.evidence.map((evidence) => evidence.observedAt.slice(0, 10))).length, nextStep: "等待更多跨场景或跨天证据，或由用户确认。", expiresAt: dateDaysFrom(at, settings.observedDays) };
+    const multiplier = settings.memoryStyle === "conservative" ? 1.5 : settings.memoryStyle === "active" ? 0.7 : 1;
+    return { reason, appearances: memory.evidence.length, distinctDays: unique(memory.evidence.map((evidence) => evidence.observedAt.slice(0, 10))).length, nextStep: "等待更多跨场景或跨天证据，或由用户确认。", expiresAt: dateDaysFrom(at, Math.max(1, Math.round(settings.observedDays * multiplier))) };
   }
 
   private promote(state: MemoryCenterState, memory: MemoryItem, actor: Actor, detail: string, at: string): void {
@@ -611,11 +704,21 @@ export class MemoryCenter {
 
   private conflictWith(state: MemoryCenterState, candidate: MemoryItem): MemoryItem | undefined {
     const candidateWords = new Set(words(candidate.content));
-    return state.memories.find((memory) => memory.id !== candidate.id && ["long_term", "pinned"].includes(memory.state) && authorityWeight[memory.authority] >= authorityWeight["dream_stable"] && memory.type === candidate.type && words(memory.content).some((word) => candidateWords.has(word)) && /(^|\s)(不|不是|不要|not|never|no)(\s|$)/i.test(`${memory.content} ${candidate.content}`));
+    const candidateDetailed = candidateWords.has("详细解释");
+    const candidateConcise = candidateWords.has("简洁回答");
+    return state.memories.find((memory) => {
+      if (memory.id === candidate.id || !["long_term", "pinned"].includes(memory.state) || authorityWeight[memory.authority] < authorityWeight["dream_stable"] || memory.type !== candidate.type) return false;
+      const existingWords = new Set(words(memory.content));
+      const oppositePreference = (candidateDetailed && existingWords.has("简洁回答")) || (candidateConcise && existingWords.has("详细解释"));
+      const sharedTopic = [...existingWords].some((word) => candidateWords.has(word));
+      const explicitNegation = /(?:不喜欢|不想|不要|不是|\b(?:not|never|no)\b)/i.test(`${memory.content} ${candidate.content}`);
+      return oppositePreference || (sharedTopic && explicitNegation);
+    });
   }
 
   private openInbox(state: MemoryCenterState, memory: MemoryItem, conflicting?: MemoryItem, kind: InboxItem["kind"] = "promotion", detail = "", at = now()): void {
     if (state.inbox.some((item) => item.memoryId === memory.id && item.status === "open" && item.kind === kind)) return;
+    if (conflicting && memory.resolvedConflictEvidence?.[conflicting.id] !== undefined && memory.resolvedConflictEvidence[conflicting.id] >= memory.evidence.length) return;
     const item: InboxItem = { id: id(), kind: conflicting?.state === "pinned" ? "pinned_conflict" : kind, memoryId: memory.id, conflictingMemoryId: conflicting?.id, createdAt: at, status: "open", detail };
     state.inbox.push(item);
     this.timeline(state, memory.id, "inbox_created", "deep_dream", detail, at);
@@ -625,25 +728,28 @@ export class MemoryCenter {
   private applyDecay(state: MemoryCenterState, at: string, actions: string[]): void {
     for (const memory of state.memories) {
       if (memory.state === "pinned" || memory.state === "archived") continue;
-      const age = new Date(at).getTime() - new Date(memory.lastReinforcedAt ?? memory.updatedAt).getTime();
-      if (memory.state === "recent" && age > state.settings.recentDays * DAY) {
+      const ageSource = memory.state === "long_term" ? (memory.lastRecalledAt ?? memory.lastReinforcedAt ?? memory.updatedAt) : (memory.lastReinforcedAt ?? memory.updatedAt);
+      const age = new Date(at).getTime() - new Date(ageSource).getTime();
+      const multiplier = state.settings.memoryStyle === "conservative" ? 1.25 : state.settings.memoryStyle === "active" ? 0.75 : 1;
+      if (memory.state === "recent" && age > state.settings.recentDays * multiplier * DAY) {
         memory.lifecycle = "expired";
-        this.deleteFromState(state, memory, false, "Recent memory expired without sufficient long-term value.", at);
+        this.deleteFromState(state, memory, "deep_dream", "Recent memory expired without sufficient long-term value.", at);
         actions.push(`清理了过期近期记忆“${memory.title}”。`);
       } else if (memory.state === "observed" && memory.observation && memory.observation.expiresAt < at) {
         memory.lifecycle = "expired";
-        this.deleteFromState(state, memory, false, "Observed candidate expired without reinforcement.", at);
+        this.deleteFromState(state, memory, "deep_dream", "Observed candidate expired without reinforcement.", at);
         actions.push(`清理了过期候选“${memory.title}”。`);
-      } else if (memory.state === "long_term" && age > state.settings.archiveDays * DAY && !memory.userConfirmed) {
+      } else if (memory.state === "long_term" && age > state.settings.archiveDays * multiplier * DAY && !memory.userConfirmed) {
         this.archiveMemory(state, memory, "deep_dream", "Long-term memory was inactive and not user-confirmed.", at);
         actions.push(`归档了长期未使用记忆“${memory.title}”。`);
-      } else if (memory.state === "long_term" && age > state.settings.dormantDays * DAY) {
+      } else if (memory.state === "long_term" && age > state.settings.dormantDays * multiplier * DAY) {
         memory.lifecycle = "dormant";
       }
     }
   }
 
   private archiveMemory(state: MemoryCenterState, memory: MemoryItem, actor: Actor, detail: string, at: string): void {
+    if (memory.state !== "archived") memory.archivedFromState = memory.state;
     memory.state = "archived";
     memory.lifecycle = "dormant";
     memory.archivedAt = at;
@@ -652,11 +758,11 @@ export class MemoryCenter {
     this.audit(state, "memory_archived", actor, `Archived “${memory.title}”.`, memory.id);
   }
 
-  private deleteFromState(state: MemoryCenterState, memory: MemoryItem, _block: boolean, detail: string, at: string): void {
+  private deleteFromState(state: MemoryCenterState, memory: MemoryItem, actor: Actor, detail: string, at: string): void {
     state.memories = state.memories.filter((item) => item.id !== memory.id);
     state.inbox = state.inbox.filter((item) => item.memoryId !== memory.id && item.conflictingMemoryId !== memory.id);
-    this.timeline(state, memory.id, "deleted", "user", detail, at);
-    this.audit(state, "memory_deleted", "user", `Deleted “${memory.title}”.`, memory.id);
+    this.timeline(state, memory.id, "deleted", actor, detail, at);
+    this.audit(state, "memory_deleted", actor, `Deleted “${memory.title}”.`, memory.id);
   }
 
   private scoreRecall(memory: MemoryItem, query: string): { score: number; reason: string } {

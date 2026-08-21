@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./plugins/hermes/runtime",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/domain.ts",
+    "src/store.ts",
+    "src/memory-center.ts",
+    "src/native-memory.ts",
+    "src/server.ts",
+    "src/web-ui.ts",
+    "src/hermes-sidecar.ts"
+  ]
+}

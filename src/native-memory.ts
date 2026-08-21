@@ -8,9 +8,10 @@ export interface FileNativeMemoryOptions {
 }
 
 /**
- * Explicit file adapter for a verified Hermes installation. Paths are supplied by
- * configuration; this class never discovers, synchronizes, or modifies a path on
- * its own. MemoryCenter only calls it after a confirmed native-memory UI action.
+ * Explicit file adapter for a verified Hermes installation. The formal Hermes
+ * adapter supplies its verified profile paths; this class never discovers,
+ * synchronizes, or modifies a path on its own. MemoryCenter calls it only after
+ * a confirmed native-memory UI action.
  */
 export class FileNativeMemoryAdapter implements NativeMemoryAdapter {
   readonly available: boolean;
@@ -20,7 +21,7 @@ export class FileNativeMemoryAdapter implements NativeMemoryAdapter {
     this.available = Boolean(options.userPath && options.memoryPath);
     this.limitation = this.available
       ? "File paths are explicit configuration only. Verify Hermes read/write behavior before enabling them."
-      : "Set both HERMES_USER_MEMORY_PATH and HERMES_LONG_TERM_MEMORY_PATH only after verifying a Hermes installation.";
+      : "The Hermes native-memory editor is disabled for this profile.";
   }
 
   async read(target: "user" | "memory"): Promise<string> {
