@@ -44,6 +44,7 @@ class HermesProviderContractTest(unittest.TestCase):
         os.environ["HERMES_HOME"] = str(cls.home_a)
         cls._install(cls.home_a)
         cls._install(cls.home_b)
+        (cls.home_a / "config.yaml").write_text("memory:\n  provider: b1ack-dream\n", encoding="utf-8")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -59,11 +60,12 @@ class HermesProviderContractTest(unittest.TestCase):
         config.write_text(json.dumps({"enable_native_memory_editor": True, "webui_enabled": True}), encoding="utf-8")
 
     def test_provider_discovery_lifecycle_and_profile_isolation(self) -> None:
-        from plugins.memory import discover_memory_providers, load_memory_provider
+        from plugins.memory import _get_active_memory_provider, discover_memory_providers, load_memory_provider
         from plugins.memory.config_schema import get_provider_config_schema
 
         discovered = {name: available for name, _description, available in discover_memory_providers()}
         self.assertTrue(discovered.get("b1ack-dream"), "Hermes must discover an available b1ack-dream user plugin")
+        self.assertEqual(_get_active_memory_provider(), "b1ack-dream", "Hermes configuration must select b1ack-dream as its active provider")
         schema = get_provider_config_schema("b1ack-dream")
         self.assertIsNotNone(schema, "Hermes dashboard must load the provider's declarative configuration")
         self.assertTrue({"memory_style", "automatic_dream", "webui_enabled"}.issubset({field.key for field in schema.fields}))
