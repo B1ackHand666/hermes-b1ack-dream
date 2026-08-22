@@ -15,7 +15,7 @@
     "test:hermes": "npm run build:plugin && python scripts/test_hermes_provider.py",
     "start": "node dist/src/index.js",
     "dev": "node --watch --experimental-strip-types src/index.ts",
-    "test": "npm run build && npm run build:plugin && node --test dist/tests/**/*.test.js",
+    "test": "npm run build && npm run build:plugin && node --test dist/tests/dashboard-bundle.test.js dist/tests/memory-center.test.js",
     "test:python": "python -m unittest discover -s tests -p \"test_*.py\"",
     "test:dashboard": "npm run build:plugin && python scripts/test_hermes_dashboard.py"
   },

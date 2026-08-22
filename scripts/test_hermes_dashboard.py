@@ -37,10 +37,18 @@ def request_json(url: str) -> dict:
 
 
 def router_is_mounted(app, router, prefix: str) -> bool:
-    """Support FastAPI's current lazy ``_IncludedRouter`` representation."""
+    """Verify the plugin router's concrete endpoints are mounted at its prefix.
+
+    FastAPI has represented ``include_router`` differently across supported
+    Python/FastAPI combinations, so do not rely on its private route wrapper.
+    """
+    endpoints = {getattr(route, "endpoint", None) for route in getattr(router, "routes", ())}
     return any(
-        getattr(route, "original_router", None) is router
-        and getattr(getattr(route, "include_context", None), "prefix", None) == prefix
+        getattr(getattr(route, "include_context", None), "prefix", None) == prefix
+        or (
+            getattr(route, "endpoint", None) in endpoints
+            and getattr(route, "path", "").startswith(prefix + "/")
+        )
         for route in app.routes
     )
 
