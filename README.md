@@ -32,7 +32,9 @@ python scripts/install_hermes_plugin.py
 hermes memory setup
 ```
 
-在 `hermes memory setup` 中选择 `b1ack-dream`。Hermes 会从 `<HERMES_HOME>/plugins/b1ack-dream/` 发现它；Provider 数据位于同一 profile 的 `<HERMES_HOME>/b1ack-dream/`。
+安装脚本会调用 Hermes 官方 `hermes plugins enable b1ack-dream` opt-in 命令；随后在 `hermes memory setup` 中选择 `b1ack-dream` 作为 active Provider。这样写入的是 Hermes 正常的 `plugins.enabled` allow-list，不会绕过插件门控。Hermes 会从 `<HERMES_HOME>/plugins/b1ack-dream/` 发现它；Provider 数据位于同一 profile 的 `<HERMES_HOME>/b1ack-dream/`。
+
+若要只复制代码、稍后再显式启用，可使用 `--skip-dashboard-enable`，之后手动运行 `hermes plugins enable b1ack-dream`。
 
 已有版本时，升级代码（数据不会删除）：
 

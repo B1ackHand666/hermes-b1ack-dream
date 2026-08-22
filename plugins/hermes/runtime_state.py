@@ -56,6 +56,29 @@ def _pid_alive(value: Any) -> bool:
         pass
     except (OSError, ProcessLookupError):
         return False
+    if os.name == "nt":
+        # ``os.kill(pid, 0)`` is not a POSIX-style liveness probe on Windows:
+        # it can terminate the target process. Use the native query API when
+        # psutil is unavailable, and fail closed only if it cannot be queried.
+        try:
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            still_active = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(process_query_limited_information, False, value)
+            if not handle:
+                # Access denied means the PID is valid but cannot be inspected.
+                return ctypes.get_last_error() == 5
+            try:
+                exit_code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == still_active
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError):
+            return False
     try:
         # Minimal fallback for lean Hermes environments. An access error means
         # the process exists but is not ours to signal.

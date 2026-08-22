@@ -56,12 +56,17 @@ class HermesDashboardContractTest(unittest.TestCase):
         os.environ["HERMES_HOME"] = str(cls.home)
         plugin = _INSTALLER.install(cls.home, force=False)
         (cls.home / "config.yaml").write_text(
-            "memory:\n  provider: b1ack-dream\nplugins:\n  enabled:\n    - b1ack-dream\n",
+            "memory:\n  provider: b1ack-dream\n",
             encoding="utf-8",
         )
         config = cls.home / "b1ack-dream" / "config.json"
         config.parent.mkdir(parents=True)
         config.write_text(json.dumps({"webui_enabled": True, "scheduled_dream_hours": 0, "enable_native_memory_editor": True}), encoding="utf-8")
+        from hermes_cli.config import load_config
+        from plugins.memory import load_memory_provider
+        setup_provider = load_memory_provider("b1ack-dream")
+        assert setup_provider is not None
+        setup_provider.post_setup(str(cls.home), load_config())
 
     @classmethod
     def tearDownClass(cls) -> None:

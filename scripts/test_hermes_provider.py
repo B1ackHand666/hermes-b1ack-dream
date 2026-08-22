@@ -78,6 +78,7 @@ class HermesProviderContractTest(unittest.TestCase):
     def test_provider_discovery_lifecycle_and_profile_isolation(self) -> None:
         from plugins.memory import _get_active_memory_provider, discover_memory_providers, load_memory_provider
         from plugins.memory.config_schema import get_provider_config_schema
+        from hermes_cli.config import load_config
 
         discovered = {name: available for name, _description, available in discover_memory_providers()}
         self.assertTrue(discovered.get("b1ack-dream"), "Hermes must discover an available b1ack-dream user plugin")
@@ -88,6 +89,8 @@ class HermesProviderContractTest(unittest.TestCase):
         provider = load_memory_provider("b1ack-dream")
         self.assertIsNotNone(provider, "Hermes must load the selected provider")
         assert provider is not None
+        provider.post_setup(str(self.home_a), load_config())
+        self.assertIn("b1ack-dream", load_config().get("plugins", {}).get("enabled", []), "memory setup must use Hermes' official plugin opt-in allow-list")
         self.assertTrue(provider.is_available())
         self.assertEqual(provider.name, "b1ack-dream")
         provider.initialize("session-1", hermes_home=str(self.home_a), platform="cli", agent_context="primary")
@@ -122,6 +125,17 @@ class HermesProviderContractTest(unittest.TestCase):
         self.assertIn("session_end", triggers, "Session-end Dream must retain its explicit trigger")
         self.assertFalse((self.home_a / "memories" / "USER.md").exists(), "Capture and Dream must not modify USER.md")
         self.assertEqual(provider.backup_paths(), [], "Provider data is inside HERMES_HOME and is backed up by Hermes itself")
+
+        primary_runtime = json.loads((self.home_a / "b1ack-dream" / "runtime.json").read_text(encoding="utf-8"))
+        subagent = provider.__class__()
+        subagent.initialize("subagent-session", hermes_home=str(self.home_a), platform="cli", agent_context="subagent")
+        self.addCleanup(subagent.shutdown)
+        self.assertIsNone(subagent._scheduler_thread, "non-primary contexts must not start the scheduler")
+        self.assertIn("国考", subagent.prefetch("公务员考试怎么复习？", session_id="subagent-session"))
+        subagent.shutdown()
+        after_subagent = json.loads((self.home_a / "b1ack-dream" / "runtime.json").read_text(encoding="utf-8"))
+        self.assertTrue(after_subagent["running"], "subagent shutdown must not stop the primary runtime")
+        self.assertEqual(after_subagent["sidecar_pid"], primary_runtime["sidecar_pid"])
 
         memory = next(item for item in state["memories"] if item["state"] != "archived")
         request_json(f"{base}/memories/{memory['id']}/pin", "POST", {})

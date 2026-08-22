@@ -92,7 +92,11 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         self._bridge = RuntimeBridge(_PLUGIN_DIR, self._data_dir, self._config, native_paths)
         try:
             self._bridge.start()
-            self._write_runtime_state(kwargs.get("agent_context", ""))
+            # Only Hermes' primary user context owns the profile runtime
+            # marker. Subagents/cron/flush may still use this sidecar for
+            # read-only Recall, but must never replace the primary state.
+            if self._write_enabled:
+                self._write_runtime_state(kwargs.get("agent_context", ""))
             if self._write_enabled:
                 self._start_scheduler()
         except Exception:
@@ -197,6 +201,22 @@ class B1ackDreamMemoryProvider(MemoryProvider):
             {"key": "enable_native_memory_editor", "description": "Enable explicit USER.md / MEMORY.md editing in the B1ack Dream UI", "default": False, "type": "boolean"},
         ]
 
+    def post_setup(self, hermes_home: str, config: dict[str, Any]) -> None:
+        """Complete explicit ``hermes memory setup`` activation.
+
+        Hermes calls this only after the user selects this Provider. Reuse
+        Hermes' official plugin opt-in command so Dashboard discovery sees the
+        same ``plugins.enabled`` allow-list as every other user plugin.
+        """
+        from hermes_cli.config import save_config
+        from hermes_cli.plugins_cmd import cmd_enable
+
+        if not isinstance(config.get("memory"), dict):
+            config["memory"] = {}
+        config["memory"]["provider"] = self.name
+        save_config(config)
+        cmd_enable(self.name, allow_tool_override=False)
+
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
         data_dir = Path(hermes_home).expanduser() / "b1ack-dream"
         existing = _read_config(data_dir / "config.json")
@@ -216,7 +236,7 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         self._flush_pending(timeout=5.0)
         bridge = self._bridge
         self._bridge = None
-        if self._data_dir:
+        if self._write_enabled and self._data_dir:
             mark_stopped(self._data_dir.parent)
         if bridge:
             bridge.stop()
@@ -307,7 +327,7 @@ class B1ackDreamMemoryProvider(MemoryProvider):
             atomic_json_write(self._config_path, self._config)
 
     def _write_runtime_state(self, agent_context: str) -> None:
-        if not self._data_dir or not self._bridge:
+        if not self._write_enabled or not self._data_dir or not self._bridge:
             return
         atomic_json_write(runtime_path(self._data_dir.parent), {
             "running": True,

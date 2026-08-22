@@ -25,6 +25,12 @@ bridge_spec.loader.exec_module(bridge)
 
 from runtime_state import runtime_path, runtime_status  # noqa: E402
 
+installer_spec = importlib.util.spec_from_file_location("b1ack_dream_installer", ROOT / "scripts" / "install_hermes_plugin.py")
+assert installer_spec and installer_spec.loader
+installer = importlib.util.module_from_spec(installer_spec)
+sys.modules[installer_spec.name] = installer
+installer_spec.loader.exec_module(installer)
+
 
 class NodeVersionTests(unittest.TestCase):
     @staticmethod
@@ -69,8 +75,8 @@ class RuntimeStateTests(unittest.TestCase):
             state_file.parent.mkdir(parents=True)
             state_file.write_text(json.dumps({
                 "running": True,
-                "provider_pid": os.getpid(),
-                "sidecar_pid": 99999999,
+                "provider_pid": None,
+                "sidecar_pid": None,
                 "started_at": "2026-01-01T00:00:00+00:00",
                 "stopped_at": None,
                 "web_ui": {"host": "127.0.0.1", "port": 9},
@@ -80,6 +86,19 @@ class RuntimeStateTests(unittest.TestCase):
             repaired = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertFalse(repaired["running"])
             self.assertIsNone(repaired["web_ui"])
+
+
+class InstallerTests(unittest.TestCase):
+    def test_enable_dashboard_uses_official_hermes_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            installer.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(["hermes"], 0, stdout="enabled", stderr=""),
+        ) as run:
+            installer.enable_dashboard_plugin(Path(temporary), executable="hermes")
+        command = run.call_args.args[0]
+        self.assertEqual(command, ["hermes", "plugins", "enable", "b1ack-dream", "--no-allow-tool-override"])
+        self.assertEqual(run.call_args.kwargs["env"]["HERMES_HOME"], str(Path(temporary)))
 
 
 if __name__ == "__main__":
