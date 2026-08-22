@@ -39,16 +39,18 @@ const oneOf = <T extends string>(value: unknown, name: string, values: readonly 
   return candidate as T;
 };
 
-export const createMemoryCenterServer = (center: MemoryCenter): Server => createServer(async (request, response) => {
+export const createMemoryCenterServer = (center: MemoryCenter, options: { standaloneUi?: boolean } = {}): Server => createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", "http://localhost");
   const method = request.method ?? "GET";
   const path = url.pathname;
   try {
     if (method === "GET" && path === "/") {
+      if (options.standaloneUi === false) return json(response, 404, { error: "Standalone WebUI is disabled. Use Hermes Dashboard → B1ack Dream." });
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       response.end(webUiHtml);
       return;
     }
+    if (method === "GET" && path === "/api/ping") return json(response, 200, { ok: true, service: "b1ack-dream" });
     if (method === "GET" && path === "/api/dashboard") return json(response, 200, await center.dashboard());
     if (method === "GET" && path === "/api/state") return json(response, 200, await center.state());
     if (method === "GET" && path === "/api/export") return json(response, 200, await center.exportData());

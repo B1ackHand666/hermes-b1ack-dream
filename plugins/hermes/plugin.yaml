@@ -1,5 +1,5 @@
 name: b1ack-dream
-version: 0.1.0
+version: 0.1.1
 description: "Independent, user-controlled long-term memory for Hermes."
 hooks:
   - on_turn_start

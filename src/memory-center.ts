@@ -8,6 +8,7 @@ import {
   type Conversation,
   type ConversationMessage,
   type DreamEntry,
+  type DreamTrigger,
   type DreamRun,
   type InboxItem,
   type LifecycleState,
@@ -137,6 +138,8 @@ const stateWeight: Record<MemoryState, number> = {
 };
 
 export class MemoryCenter {
+  private dreamQueue: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly store: JsonMemoryStore,
     private readonly nativeMemory?: NativeMemoryAdapter,
@@ -377,8 +380,17 @@ export class MemoryCenter {
     });
   }
 
-  async runDream(): Promise<DreamRun> {
-    const run: DreamRun = { id: id(), startedAt: now(), status: "completed", entries: [] };
+  async runDream(trigger: DreamTrigger = "manual"): Promise<DreamRun> {
+    // The provider, Dashboard and standalone UI share one engine. Serialize
+    // whole runs so stage transitions cannot interleave across triggers.
+    const execute = () => this.runDreamNow(trigger);
+    const work = this.dreamQueue.then(execute, execute);
+    this.dreamQueue = work.then(() => undefined, () => undefined);
+    return work;
+  }
+
+  private async runDreamNow(trigger: DreamTrigger): Promise<DreamRun> {
+    const run: DreamRun = { id: id(), trigger, startedAt: now(), status: "completed", entries: [] };
     await this.store.transaction((state) => state.dreams.push(run));
     for (const stage of ["light", "rem", "deep"] as const) {
       try {

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export type MemoryState = "recent" | "observed" | "long_term" | "pinned" | "archived";
 export type LifecycleState = "active" | "stable" | "dormant" | "expired";
@@ -17,6 +17,7 @@ export type MemoryType =
   | "other";
 export type Actor = "user" | "capture" | "light_dream" | "rem_dream" | "deep_dream" | "system";
 export type DreamStage = "light" | "rem" | "deep";
+export type DreamTrigger = "manual" | "session_end" | "scheduled" | "startup_catchup";
 export type InboxKind = "promotion" | "conflict" | "pinned_conflict";
 export type BoundaryScope = "memory" | "topic" | "type" | "rule";
 export type RecallContextStatus = "selected" | "injected" | "not_injected" | "unknown";
@@ -154,6 +155,8 @@ export interface DreamEntry {
 
 export interface DreamRun {
   id: string;
+  /** Why this run started; shown verbatim in the Dream Diary. */
+  trigger: DreamTrigger;
   startedAt: string;
   completedAt?: string;
   status: "completed" | "partial" | "failed";

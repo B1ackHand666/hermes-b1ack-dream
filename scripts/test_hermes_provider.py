@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -16,6 +19,10 @@ from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+_INSTALLER_SPEC = importlib.util.spec_from_file_location("b1ack_dream_installer", REPOSITORY / "scripts" / "install_hermes_plugin.py")
+assert _INSTALLER_SPEC and _INSTALLER_SPEC.loader
+_INSTALLER = importlib.util.module_from_spec(_INSTALLER_SPEC)
+_INSTALLER_SPEC.loader.exec_module(_INSTALLER)
 _ARGUMENTS = argparse.ArgumentParser(add_help=False)
 _ARGUMENTS.add_argument("--hermes-source", default=os.environ.get("HERMES_SOURCE"))
 _OPTIONS, _UNITTEST_ARGS = _ARGUMENTS.parse_known_args()
@@ -52,12 +59,21 @@ class HermesProviderContractTest(unittest.TestCase):
 
     @staticmethod
     def _install(home: Path) -> None:
-        plugin = home / "plugins" / "b1ack-dream"
-        plugin.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(REPOSITORY / "plugins" / "hermes", plugin)
+        plugin = _INSTALLER.install(home, force=False)
+        if not (plugin / "dashboard" / "dist" / "index.js").is_file():
+            raise AssertionError("Installer did not copy the Dashboard bundle")
+        if not (plugin / "dashboard" / "dist" / "style.css").is_file():
+            raise AssertionError("Installer did not copy the Dashboard stylesheet")
         config = home / "b1ack-dream" / "config.json"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({"enable_native_memory_editor": True, "webui_enabled": True}), encoding="utf-8")
+        config.write_text(json.dumps({
+            "enable_native_memory_editor": True,
+            "webui_enabled": True,
+            # A sub-second interval makes the contract prove that a running
+            # provider schedules without waiting for on_turn_start().
+            "scheduled_dream_hours": 0.0001,
+            "last_scheduled_dream_at": 0,
+        }), encoding="utf-8")
 
     def test_provider_discovery_lifecycle_and_profile_isolation(self) -> None:
         from plugins.memory import _get_active_memory_provider, discover_memory_providers, load_memory_provider
@@ -90,7 +106,8 @@ class HermesProviderContractTest(unittest.TestCase):
         self.assertIsNotNone(provider.recall_status())
         self.assertGreater(provider.recall_status().count, 0)
 
-        provider.on_turn_start(1, "当前回合")
+        # Do not call on_turn_start: the scheduler must run while idle.
+        time.sleep(1.2)
         provider.on_session_end([])
         provider._flush_pending(timeout=8.0)
         runtime = json.loads((self.home_a / "b1ack-dream" / "runtime.json").read_text(encoding="utf-8"))
@@ -99,7 +116,10 @@ class HermesProviderContractTest(unittest.TestCase):
         base = f"http://{web_ui['host']}:{web_ui['port']}/api"
         state = request_json(f"{base}/state")
         self.assertGreaterEqual(len(state["conversations"]), 3)
-        self.assertGreaterEqual(len(state["dreams"]), 2, "Scheduled and session-end Dream must both run through real Hermes hooks")
+        triggers = {dream.get("trigger") for dream in state["dreams"]}
+        self.assertIn("startup_catchup", triggers, "Provider startup must perform one overdue catch-up Dream")
+        self.assertIn("scheduled", triggers, "Scheduled Dream must run without a new user turn")
+        self.assertIn("session_end", triggers, "Session-end Dream must retain its explicit trigger")
         self.assertFalse((self.home_a / "memories" / "USER.md").exists(), "Capture and Dream must not modify USER.md")
         self.assertEqual(provider.backup_paths(), [], "Provider data is inside HERMES_HOME and is backed up by Hermes itself")
 
@@ -111,6 +131,24 @@ class HermesProviderContractTest(unittest.TestCase):
         self.assertTrue(state_after_copy["nativeMemoryHistory"])
 
         provider.shutdown()
+        stopped = json.loads((self.home_a / "b1ack-dream" / "runtime.json").read_text(encoding="utf-8"))
+        self.assertFalse(stopped["running"], "shutdown must not leave a stale running runtime state")
+        self.assertIsNone(stopped["web_ui"])
+        self.assertIsNone(provider._scheduler_thread, "scheduler thread must be joined during shutdown")
+        from plugins.memory import discover_plugin_cli_commands
+
+        cli_commands = discover_plugin_cli_commands()
+        self.assertEqual(len(cli_commands), 1, "Hermes must discover the active provider's CLI")
+        cli_parser = argparse.ArgumentParser()
+        cli_subparsers = cli_parser.add_subparsers()
+        b1ack_dream_parser = cli_subparsers.add_parser(cli_commands[0]["name"])
+        cli_commands[0]["setup_fn"](b1ack_dream_parser)
+        cli_args = cli_parser.parse_args(["b1ack-dream", "ui"])
+        cli_output = io.StringIO()
+        with contextlib.redirect_stdout(cli_output):
+            cli_args.func(cli_args)
+        self.assertIn("WebUI is not running", cli_output.getvalue(), "CLI must not print a stale local URL after shutdown")
+        self.assertNotIn("http://127.0.0.1:", cli_output.getvalue())
         restarted = provider.__class__()
         restarted.initialize("session-restart", hermes_home=str(self.home_a), platform="cli", agent_context="primary")
         self.addCleanup(restarted.shutdown)

@@ -28,6 +28,15 @@ export const migrateState = (raw) => {
         }
         state.schemaVersion = 2;
     }
+    if ((state.schemaVersion ?? version) === 2) {
+        // Earlier Diary rows predate the explicit trigger field. They must not be
+        // retrospectively claimed as scheduled runs, so legacy rows use manual.
+        for (const run of state.dreams ?? []) {
+            if (run && typeof run === "object" && run.trigger === undefined)
+                run.trigger = "manual";
+        }
+        state.schemaVersion = 3;
+    }
     return state;
 };
 /** Atomic JSON state with a small cross-process lock for profile-scoped providers. */

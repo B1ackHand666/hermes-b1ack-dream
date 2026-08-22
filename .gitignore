@@ -2,3 +2,5 @@ node_modules/
 dist/
 .memory-center/
 *.log
+__pycache__/
+*.py[cod]

@@ -45,15 +45,15 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             label="Scheduled Dream interval (hours)",
             kind=KIND_NUMBER,
             default="24",
-            description="0 disables scheduled consolidation; automatic session-end Dream remains configurable above.",
+            description="0 disables scheduled consolidation; a running provider uses this real timer even without a new user turn.",
             group="Advanced",
         ),
         ProviderField(
             key="webui_enabled",
-            label="Enable local WebUI",
+            label="Enable standalone local WebUI fallback",
             kind=KIND_BOOL,
             default="true",
-            description="The management UI binds only to 127.0.0.1.",
+            description="Disables only the standalone HTML fallback; Hermes Dashboard management remains available through its authenticated plugin API.",
             inline=True,
         ),
         ProviderField(

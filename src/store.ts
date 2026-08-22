@@ -12,7 +12,7 @@ export class DataCorruptionError extends Error {
 /** Migrate only known historical states; future or malformed schemas fail closed. */
 export const migrateState = (raw: unknown): MemoryCenterState => {
   if (!raw || typeof raw !== "object") throw new DataCorruptionError("B1ack Dream data is not an object.");
-  const state = raw as Partial<MemoryCenterState> & { schemaVersion?: number; recalls?: Array<Record<string, unknown>> };
+  const state = raw as Partial<MemoryCenterState> & { schemaVersion?: number; recalls?: Array<Record<string, unknown>>; dreams?: Array<Record<string, unknown>> };
   if (!Array.isArray(state.memories)) throw new DataCorruptionError("B1ack Dream data has no memory collection.");
   const version = state.schemaVersion ?? 1;
   if (version > SCHEMA_VERSION) throw new DataCorruptionError(`B1ack Dream data schema ${version} is newer than this runtime.`);
@@ -25,6 +25,14 @@ export const migrateState = (raw: unknown): MemoryCenterState => {
       record.contextStatus = "unknown";
     }
     state.schemaVersion = 2;
+  }
+  if ((state.schemaVersion ?? version) === 2) {
+    // Earlier Diary rows predate the explicit trigger field. They must not be
+    // retrospectively claimed as scheduled runs, so legacy rows use manual.
+    for (const run of state.dreams ?? []) {
+      if (run && typeof run === "object" && (run as { trigger?: unknown }).trigger === undefined) run.trigger = "manual";
+    }
+    state.schemaVersion = 3;
   }
   return state as MemoryCenterState;
 };

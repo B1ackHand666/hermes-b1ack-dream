@@ -1,4 +1,4 @@
-"""Official Hermes MemoryProvider adapter for Hermes B1ack Dream 0.1.0."""
+"""Official Hermes MemoryProvider adapter for Hermes B1ack Dream 0.1.1."""
 
 from __future__ import annotations
 
@@ -15,24 +15,18 @@ from typing import Any, Dict, List, Optional
 from agent.memory_provider import MemoryProvider, RecallStatus
 
 from .bridge import BridgeError, RuntimeBridge
+from .runtime_state import atomic_json_write, mark_stopped, runtime_path, utc_now
 
 logger = logging.getLogger(__name__)
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _DEFAULT_CONFIG: dict[str, Any] = {
     "automatic_dream": True,
-    "scheduled_dream_hours": 24,
+    "scheduled_dream_hours": 24.0,
     "memory_style": "balanced",
     "webui_enabled": True,
     "webui_port": 0,
     "enable_native_memory_editor": False,
 }
-
-
-def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def _read_config(path: Path) -> dict[str, Any]:
@@ -61,25 +55,30 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         self._cache_lock = threading.Lock()
         self._shutdown = False
         self._scheduled_in_flight = False
+        self._scheduler_stop = threading.Event()
+        self._scheduler_thread: threading.Thread | None = None
+        self._last_scheduled_attempt_at = 0.0
 
     @property
     def name(self) -> str:
         return "b1ack-dream"
 
     def is_available(self) -> bool:
-        return RuntimeBridge.runtime_path(_PLUGIN_DIR).is_file() and RuntimeBridge.node_path() is not None
+        return RuntimeBridge.runtime_path(_PLUGIN_DIR).is_file() and RuntimeBridge.node_unavailable_reason() is None
 
     def unavailable_reason(self) -> str:
         if not RuntimeBridge.runtime_path(_PLUGIN_DIR).is_file():
             return "The B1ack Dream plugin runtime is incomplete; reinstall the plugin."
-        if RuntimeBridge.node_path() is None:
-            return "Install Node.js 20 or newer and ensure `node` is on PATH."
+        node_reason = RuntimeBridge.node_unavailable_reason()
+        if node_reason:
+            return node_reason
         return "B1ack Dream is unavailable."
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         if self._shutdown:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="b1ack-dream")
             self._shutdown = False
+            self._scheduler_stop = threading.Event()
         hermes_home = Path(str(kwargs["hermes_home"])).expanduser().resolve()
         self._data_dir = hermes_home / "b1ack-dream"
         self._config_path = self._data_dir / "config.json"
@@ -94,9 +93,12 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         try:
             self._bridge.start()
             self._write_runtime_state(kwargs.get("agent_context", ""))
+            if self._write_enabled:
+                self._start_scheduler()
         except Exception:
             self._bridge.stop()
             self._bridge = None
+            self._stop_scheduler()
             raise
 
     def system_prompt_block(self) -> str:
@@ -152,8 +154,9 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         self._executor.submit(archive)
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
-        if self._write_enabled:
-            self._schedule_dream_if_due()
+        # Scheduling is driven by the internal timer started in initialize().
+        # Keep this hook deliberately side-effect-free for compatibility.
+        return None
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if not self._write_enabled or not self._bridge:
@@ -188,8 +191,8 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         return [
             {"key": "memory_style", "description": "Memory behavior style", "default": "balanced", "choices": ["conservative", "balanced", "active"]},
             {"key": "automatic_dream", "description": "Run a Dream at the end of primary sessions", "default": True, "type": "boolean"},
-            {"key": "scheduled_dream_hours", "description": "Run scheduled consolidation at most once per N hours (0 disables)", "default": 24, "type": "integer", "minimum": 0, "maximum": 168},
-            {"key": "webui_enabled", "description": "Start the localhost B1ack Dream management UI", "default": True, "type": "boolean"},
+            {"key": "scheduled_dream_hours", "description": "Run scheduled consolidation at most once per N hours (0 disables)", "default": 24, "type": "number", "minimum": 0, "maximum": 168},
+            {"key": "webui_enabled", "description": "Enable the standalone localhost B1ack Dream UI fallback (Dashboard stays available)", "default": True, "type": "boolean"},
             {"key": "webui_port", "description": "Local WebUI port (0 selects an available port)", "default": 0, "type": "integer", "minimum": 0, "maximum": 65535},
             {"key": "enable_native_memory_editor", "description": "Enable explicit USER.md / MEMORY.md editing in the B1ack Dream UI", "default": False, "type": "boolean"},
         ]
@@ -198,7 +201,7 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         data_dir = Path(hermes_home).expanduser() / "b1ack-dream"
         existing = _read_config(data_dir / "config.json")
         merged = {**existing, **{key: value for key, value in values.items() if key in _DEFAULT_CONFIG}}
-        _atomic_json_write(data_dir / "config.json", merged)
+        atomic_json_write(data_dir / "config.json", merged)
 
     def backup_paths(self) -> List[str]:
         # All provider data deliberately lives inside profile-scoped HERMES_HOME;
@@ -209,9 +212,12 @@ class B1ackDreamMemoryProvider(MemoryProvider):
         if self._shutdown:
             return
         self._shutdown = True
+        self._stop_scheduler()
         self._flush_pending(timeout=5.0)
         bridge = self._bridge
         self._bridge = None
+        if self._data_dir:
+            mark_stopped(self._data_dir.parent)
         if bridge:
             bridge.stop()
         self._executor.shutdown(wait=False, cancel_futures=False)
@@ -221,35 +227,99 @@ class B1ackDreamMemoryProvider(MemoryProvider):
             return
         try:
             self._bridge.call("dream", {"trigger": trigger}, timeout=8.0)
-            if trigger == "scheduled":
+            if trigger in {"scheduled", "startup_catchup"}:
                 self._record_scheduled_time()
         except Exception as exc:
             logger.warning("B1ack Dream %s Dream failed: %s", trigger, exc)
+            if trigger in {"scheduled", "startup_catchup"}:
+                self._record_scheduled_failure(str(exc))
 
-    def _schedule_dream_if_due(self) -> None:
-        hours = int(self._config.get("scheduled_dream_hours", 0) or 0)
-        if hours <= 0 or not self._config_path or self._scheduled_in_flight:
+    def _scheduled_interval_seconds(self) -> float:
+        try:
+            hours = float(self._config.get("scheduled_dream_hours", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return hours * 3600 if hours > 0 else 0.0
+
+    def _start_scheduler(self) -> None:
+        if self._scheduler_thread and self._scheduler_thread.is_alive():
             return
-        last = float(self._config.get("last_scheduled_dream_at", 0) or 0)
-        if time.time() - last < hours * 3600:
+        if self._scheduled_interval_seconds() <= 0:
             return
-        self._scheduled_in_flight = True
+        self._scheduler_stop.clear()
+        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, name="b1ack-dream-scheduler", daemon=False)
+        self._scheduler_thread.start()
+
+    def _stop_scheduler(self) -> None:
+        self._scheduler_stop.set()
+        thread = self._scheduler_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._scheduler_thread = None
+
+    def _scheduler_loop(self) -> None:
+        # A restart after a missed due time gets one catch-up run.  Attempts
+        # are throttled independently from successes, so a failed Dream does
+        # not spin while remaining eligible for the next period.
+        while not self._scheduler_stop.is_set() and not self._shutdown:
+            interval = self._scheduled_interval_seconds()
+            if interval <= 0:
+                return
+            try:
+                last_success = float(self._config.get("last_scheduled_dream_at", 0) or 0)
+            except (TypeError, ValueError):
+                last_success = 0.0
+            anchor = max(last_success, self._last_scheduled_attempt_at)
+            overdue = anchor <= 0 or time.time() - anchor >= interval
+            if overdue:
+                trigger = "startup_catchup" if last_success <= 0 else "scheduled"
+                self._submit_scheduled_dream(trigger)
+                self._last_scheduled_attempt_at = time.time()
+                # Give the queued job a chance to set a success timestamp;
+                # this also bounds test intervals without a busy loop.
+                self._scheduler_stop.wait(min(interval, 1.0))
+                continue
+            remaining = max(0.05, interval - (time.time() - anchor))
+            self._scheduler_stop.wait(remaining)
+
+    def _submit_scheduled_dream(self, trigger: str) -> None:
+        with self._cache_lock:
+            if self._scheduled_in_flight or self._shutdown:
+                return
+            self._scheduled_in_flight = True
         def scheduled() -> None:
             try:
-                self._run_dream("scheduled")
+                self._run_dream(trigger)
             finally:
-                self._scheduled_in_flight = False
+                with self._cache_lock:
+                    self._scheduled_in_flight = False
         self._executor.submit(scheduled)
 
     def _record_scheduled_time(self) -> None:
         if self._config_path:
             self._config["last_scheduled_dream_at"] = time.time()
-            _atomic_json_write(self._config_path, self._config)
+            self._config.pop("last_scheduled_dream_failure", None)
+            atomic_json_write(self._config_path, self._config)
+
+    def _record_scheduled_failure(self, error: str) -> None:
+        if self._config_path:
+            self._config["last_scheduled_dream_failure"] = {"at": utc_now(), "error": error[:500]}
+            atomic_json_write(self._config_path, self._config)
 
     def _write_runtime_state(self, agent_context: str) -> None:
         if not self._data_dir or not self._bridge:
             return
-        _atomic_json_write(self._data_dir / "runtime.json", {"web_ui": self._bridge.web_ui, "pid": os.getpid(), "session_id": self._session_id, "agent_context": agent_context})
+        atomic_json_write(runtime_path(self._data_dir.parent), {
+            "running": True,
+            "provider_pid": os.getpid(),
+            "sidecar_pid": self._bridge.pid,
+            "started_at": utc_now(),
+            "stopped_at": None,
+            "web_ui": self._bridge.web_ui,
+            "standalone_web_ui_enabled": bool(self._config.get("webui_enabled", True)),
+            "session_id": self._session_id,
+            "agent_context": agent_context,
+        })
 
     def _flush_pending(self, timeout: float) -> None:
         if self._shutdown and self._bridge is None:

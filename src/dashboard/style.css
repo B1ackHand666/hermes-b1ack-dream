@@ -1,0 +1,8 @@
+/* Optional Dashboard-plugin styles. Keep these namespaced and theme-aware. */
+.b1ack-dream-dashboard textarea {
+  color: var(--foreground, inherit);
+}
+
+.b1ack-dream-dashboard select {
+  color: var(--foreground, inherit);
+}

@@ -1,6 +1,6 @@
 {
   "name": "hermes-b1ack-dream",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Hermes B1ack Dream: independent, user-controlled long-term memory provider for Hermes.",
   "type": "module",
@@ -9,13 +9,15 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:plugin": "tsc -p tsconfig.plugin.json",
+    "build:plugin": "tsc -p tsconfig.plugin.json && tsc -p tsconfig.dashboard.json && node scripts/build-dashboard-assets.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "benchmark": "npm run build && node scripts/benchmark_memory_center.mjs",
     "test:hermes": "npm run build:plugin && python scripts/test_hermes_provider.py",
     "start": "node dist/src/index.js",
     "dev": "node --watch --experimental-strip-types src/index.ts",
-    "test": "npm run build && npm run build:plugin && node --test dist/tests/**/*.test.js"
+    "test": "npm run build && npm run build:plugin && node --test dist/tests/**/*.test.js",
+    "test:python": "python -m unittest discover -s tests -p \"test_*.py\"",
+    "test:dashboard": "npm run build:plugin && python scripts/test_hermes_dashboard.py"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

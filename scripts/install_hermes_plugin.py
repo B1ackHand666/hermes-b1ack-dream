@@ -24,8 +24,15 @@ def hermes_home(value: str | None) -> Path:
 
 def install(target_home: Path, *, force: bool) -> Path:
     runtime = SOURCE / "runtime" / "hermes-sidecar.js"
-    if not runtime.is_file():
-        raise RuntimeError("Bundled runtime is missing. Run `npm ci` then `npm run build:plugin` before installing.")
+    dashboard = SOURCE / "dashboard"
+    required_dashboard_files = (
+        dashboard / "manifest.json",
+        dashboard / "plugin_api.py",
+        dashboard / "dist" / "index.js",
+        dashboard / "dist" / "style.css",
+    )
+    if not runtime.is_file() or any(not path.is_file() for path in required_dashboard_files):
+        raise RuntimeError("Bundled runtime or Dashboard bundle is missing. Run `npm ci` then `npm run build:plugin` before installing.")
     target = target_home / "plugins" / "b1ack-dream"
     if target.exists() and not force:
         raise RuntimeError(f"{target} already exists. Re-run with --force to replace plugin code; profile data is preserved.")
@@ -52,6 +59,7 @@ def main() -> int:
         return 1
     print(f"Installed Hermes B1ack Dream to {target}")
     print("Run `hermes memory setup`, select `b1ack-dream`, then start Hermes normally.")
+    print("After enabling the plugin, manage it in `hermes dashboard` → B1ack Dream.")
     return 0
 
 

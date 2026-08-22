@@ -10,13 +10,19 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
 
 class BridgeError(RuntimeError):
     """Raised when the local runtime is unavailable or does not answer safely."""
+
+
+class NodeVersion(NamedTuple):
+    executable: str
+    major: int
+    text: str
 
 
 class RuntimeBridge:
@@ -39,6 +45,10 @@ class RuntimeBridge:
     def web_ui(self) -> dict[str, Any] | None:
         return (self._ready or {}).get("webUi")
 
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process else None
+
     @staticmethod
     def runtime_path(plugin_dir: Path) -> Path:
         return plugin_dir / "runtime" / "hermes-sidecar.js"
@@ -47,21 +57,73 @@ class RuntimeBridge:
     def node_path() -> str | None:
         return shutil.which("node")
 
+    @classmethod
+    def node_version(cls, *, timeout: float = 2.0) -> NodeVersion | None:
+        """Read a real local Node version, failing closed on any ambiguity."""
+        node = cls.node_path()
+        if not node:
+            return None
+        try:
+            completed = subprocess.run(
+                [node, "--version"], capture_output=True, text=True,
+                encoding="utf-8", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            return None
+        output = (completed.stdout or "").strip()
+        if completed.returncode != 0:
+            return None
+        # Node's stable contract is vMAJOR.MINOR.PATCH.  Treat diagnostic
+        # output, partial versions and arbitrary wrappers as unavailable.
+        import re
+        matched = re.fullmatch(r"v?(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", output)
+        if not matched:
+            return None
+        return NodeVersion(node, int(matched.group(1)), output)
+
+    @classmethod
+    def node_unavailable_reason(cls) -> str | None:
+        node = cls.node_path()
+        if not node:
+            return "Node.js was not found on PATH. B1ack Dream requires Node.js 20 or newer."
+        version = cls.node_version()
+        if version is None:
+            return "Node.js version could not be verified. B1ack Dream requires Node.js 20 or newer."
+        if version.major < 20:
+            return f"Node.js {version.text.removeprefix('v')} detected. B1ack Dream requires Node.js 20 or newer."
+        return None
+
+    @classmethod
+    def require_compatible_node(cls) -> NodeVersion:
+        reason = cls.node_unavailable_reason()
+        if reason:
+            raise BridgeError(reason)
+        version = cls.node_version()
+        # The second lookup cannot normally differ, but fail closed if PATH is
+        # swapped between checks.
+        if version is None or version.major < 20:
+            raise BridgeError("Node.js version could not be verified. B1ack Dream requires Node.js 20 or newer.")
+        return version
+
     def start(self, timeout: float = 8.0) -> None:
         if self.is_running:
             return
         runtime = self.runtime_path(self._plugin_dir)
-        node = self.node_path()
         if not runtime.is_file():
             raise BridgeError(f"Bundled B1ack Dream runtime is missing: {runtime}")
-        if not node:
-            raise BridgeError("Node.js 20+ is required by the installed B1ack Dream runtime but was not found on PATH.")
+        # Do not rely on a prior provider availability probe: this method can
+        # be called directly and PATH can change while Hermes is running.
+        node = self.require_compatible_node().executable
         self._data_dir.mkdir(parents=True, exist_ok=True)
         args = [
             node, str(runtime), "--data-dir", str(self._data_dir),
             "--host", "127.0.0.1",
             "--port", str(int(self._config.get("webui_port", 0) or 0)),
-            "--web-ui", "true" if self._config.get("webui_enabled", True) else "false",
+            # The local API is required for the authenticated Hermes Dashboard
+            # proxy. ``webui_enabled`` controls only the standalone HTML
+            # fallback; it never disables the provider's Dashboard backend.
+            "--web-ui", "true",
+            "--standalone-ui", "true" if self._config.get("webui_enabled", True) else "false",
         ]
         if self._native_paths:
             args.extend(["--user-path", str(self._native_paths[0]), "--memory-path", str(self._native_paths[1])])

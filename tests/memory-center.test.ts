@@ -177,8 +177,17 @@ test("archive restores its original state and native restore restores the displa
 
 test("schema v1 recall records migrate fail-closed", () => {
   const migrated = migrateState({ schemaVersion: 1, memories: [], conversations: [], traces: [], timeline: [], audit: [], recalls: [{ includedInContext: true }], inbox: [], boundaries: [], dreams: [], nativeMemoryHistory: [], settings: {} });
-  assert.equal(migrated.schemaVersion, 2);
+  assert.equal(migrated.schemaVersion, 3);
   assert.equal(migrated.recalls[0]?.contextStatus, "unknown");
+});
+
+test("Dream Diary preserves an explicit trigger and serializes runs", async (t) => {
+  const { folder, center } = await setup();
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const [scheduled, sessionEnd] = await Promise.all([center.runDream("scheduled"), center.runDream("session_end")]);
+  assert.equal(scheduled.trigger, "scheduled");
+  assert.equal(sessionEnd.trigger, "session_end");
+  assert.deepEqual((await center.state()).dreams.map((run) => run.trigger), ["scheduled", "session_end"]);
 });
 
 test("a failed Dream preserves existing memory and records a partial run", async (t) => {
@@ -238,4 +247,20 @@ test("local WebUI and API expose live Hermes B1ack Dream data", async (t) => {
   const detail = await requestLocal(`http://127.0.0.1:${port}/api/memories/${encodeURIComponent(memoryId)}/detail`);
   assert.equal(detail.status, 200);
   assert.equal((JSON.parse(detail.body) as { memory: { id: string } }).memory.id, memoryId);
+});
+
+test("Dashboard engine API stays available when the standalone fallback is disabled", async (t) => {
+  const { folder, center } = await setup();
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const server = createMemoryCenterServer(center, { standaloneUi: false });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${address.port}`;
+  assert.equal((await fetch(`${base}/`)).status, 404);
+  assert.equal((await fetch(`${base}/api/ping`)).status, 200);
 });
