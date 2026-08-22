@@ -73,6 +73,7 @@ const stateWeight = {
 export class MemoryCenter {
     store;
     nativeMemory;
+    dreamQueue = Promise.resolve();
     constructor(store, nativeMemory) {
         this.store = store;
         this.nativeMemory = nativeMemory;
@@ -308,8 +309,16 @@ export class MemoryCenter {
             this.audit(state, "boundary_removed", "user", "Removed Memory Boundary.", undefined, undefined, { boundaryId });
         });
     }
-    async runDream() {
-        const run = { id: id(), startedAt: now(), status: "completed", entries: [] };
+    async runDream(trigger = "manual") {
+        // The provider, Dashboard and standalone UI share one engine. Serialize
+        // whole runs so stage transitions cannot interleave across triggers.
+        const execute = () => this.runDreamNow(trigger);
+        const work = this.dreamQueue.then(execute, execute);
+        this.dreamQueue = work.then(() => undefined, () => undefined);
+        return work;
+    }
+    async runDreamNow(trigger) {
+        const run = { id: id(), trigger, startedAt: now(), status: "completed", entries: [] };
         await this.store.transaction((state) => state.dreams.push(run));
         for (const stage of ["light", "rem", "deep"]) {
             try {

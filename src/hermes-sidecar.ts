@@ -9,7 +9,7 @@ import { createMemoryCenterServer, listen } from "./server.js";
 import { defaultDataPath, JsonMemoryStore } from "./store.js";
 
 type Request = { id?: string; method?: string; params?: Record<string, unknown> };
-type Args = { dataDir: string; host: string; port: number; webUi: boolean; userPath?: string; memoryPath?: string };
+type Args = { dataDir: string; host: string; port: number; webUi: boolean; standaloneUi: boolean; userPath?: string; memoryPath?: string };
 
 const parseArgs = (): Args => {
   const values = process.argv.slice(2);
@@ -18,7 +18,7 @@ const parseArgs = (): Args => {
   if (!dataDir) throw new Error("--data-dir is required");
   const port = Number(valueFor("--port") ?? "0");
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("--port must be an integer from 0 to 65535");
-  return { dataDir, host: valueFor("--host") ?? "127.0.0.1", port, webUi: valueFor("--web-ui") !== "false", userPath: valueFor("--user-path"), memoryPath: valueFor("--memory-path") };
+  return { dataDir, host: valueFor("--host") ?? "127.0.0.1", port, webUi: valueFor("--web-ui") !== "false", standaloneUi: valueFor("--standalone-ui") !== "false", userPath: valueFor("--user-path"), memoryPath: valueFor("--memory-path") };
 };
 
 const reply = (id: string | undefined, result?: unknown, error?: unknown): void => {
@@ -28,7 +28,7 @@ const reply = (id: string | undefined, result?: unknown, error?: unknown): void 
 const options = parseArgs();
 const native = new FileNativeMemoryAdapter({ userPath: options.userPath, memoryPath: options.memoryPath });
 const center = createMemoryCenter(new JsonMemoryStore(defaultDataPath(options.dataDir)), native);
-const webServer = options.webUi ? createMemoryCenterServer(center) : undefined;
+const webServer = options.webUi ? createMemoryCenterServer(center, { standaloneUi: options.standaloneUi }) : undefined;
 let webPort: number | undefined;
 if (webServer) {
   await listen(webServer, options.port, options.host);
@@ -69,7 +69,11 @@ const run = async (request: Request): Promise<unknown> => {
       await center.markRecallOutcome(result.memories.map((memory) => memory.recordId), result.context ? "injected" : "not_injected");
       return { context: result.context, count: result.memories.length, recordIds: result.memories.map((memory) => memory.recordId) };
     }
-    case "dream": return center.runDream();
+    case "dream": {
+      const trigger = String(params.trigger ?? "manual");
+      if (!["manual", "session_end", "scheduled", "startup_catchup"].includes(trigger)) throw new Error("Dream trigger is invalid.");
+      return center.runDream(trigger as "manual" | "session_end" | "scheduled" | "startup_catchup");
+    }
     case "status": return center.dashboard();
     case "flush": return { flushed: true };
     case "shutdown": {

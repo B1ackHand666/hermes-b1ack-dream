@@ -1,0 +1,14 @@
+{
+  "name": "b1ack-dream",
+  "label": "B1ack Dream",
+  "description": "Transparent long-term memory for Hermes",
+  "icon": "Database",
+  "version": "0.1.1",
+  "tab": {
+    "path": "/b1ack-dream",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

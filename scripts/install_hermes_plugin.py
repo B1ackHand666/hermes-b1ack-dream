@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,8 +25,15 @@ def hermes_home(value: str | None) -> Path:
 
 def install(target_home: Path, *, force: bool) -> Path:
     runtime = SOURCE / "runtime" / "hermes-sidecar.js"
-    if not runtime.is_file():
-        raise RuntimeError("Bundled runtime is missing. Run `npm ci` then `npm run build:plugin` before installing.")
+    dashboard = SOURCE / "dashboard"
+    required_dashboard_files = (
+        dashboard / "manifest.json",
+        dashboard / "plugin_api.py",
+        dashboard / "dist" / "index.js",
+        dashboard / "dist" / "style.css",
+    )
+    if not runtime.is_file() or any(not path.is_file() for path in required_dashboard_files):
+        raise RuntimeError("Bundled runtime or Dashboard bundle is missing. Run `npm ci` then `npm run build:plugin` before installing.")
     target = target_home / "plugins" / "b1ack-dream"
     if target.exists() and not force:
         raise RuntimeError(f"{target} already exists. Re-run with --force to replace plugin code; profile data is preserved.")
@@ -40,18 +48,55 @@ def install(target_home: Path, *, force: bool) -> Path:
     return target
 
 
+def enable_dashboard_plugin(target_home: Path, *, executable: str = "hermes") -> None:
+    """Use Hermes' official opt-in command for the installed user plugin."""
+    environment = os.environ.copy()
+    environment["HERMES_HOME"] = str(target_home)
+    command = [executable, "plugins", "enable", "b1ack-dream", "--no-allow-tool-override"]
+    try:
+        completed = subprocess.run(
+            command,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            "Hermes CLI was not found. Run `hermes plugins enable b1ack-dream` "
+            "after installing Hermes, or pass --skip-dashboard-enable."
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[-500:]
+        raise RuntimeError(
+            "Hermes refused to enable b1ack-dream through its official plugin opt-in. "
+            f"{detail or 'Run `hermes plugins enable b1ack-dream` manually.'}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install the Hermes B1ack Dream Memory Provider.")
     parser.add_argument("--hermes-home", help="Hermes profile directory (defaults to HERMES_HOME or ~/.hermes)")
     parser.add_argument("--force", action="store_true", help="Replace existing plugin code; never deletes b1ack-dream profile data")
+    parser.add_argument(
+        "--skip-dashboard-enable",
+        action="store_true",
+        help="Install code without invoking Hermes' official plugins enable command",
+    )
+    parser.add_argument("--hermes-executable", default="hermes", help="Hermes executable used for official plugin opt-in")
     args = parser.parse_args()
+    target_home = hermes_home(args.hermes_home)
     try:
-        target = install(hermes_home(args.hermes_home), force=args.force)
+        target = install(target_home, force=args.force)
+        if not args.skip_dashboard_enable:
+            enable_dashboard_plugin(target_home, executable=args.hermes_executable)
     except RuntimeError as exc:
         print(f"Installation failed: {exc}", file=sys.stderr)
         return 1
     print(f"Installed Hermes B1ack Dream to {target}")
-    print("Run `hermes memory setup`, select `b1ack-dream`, then start Hermes normally.")
+    print("Hermes opt-in enabled `b1ack-dream`; run `hermes memory setup` and select it, then start Hermes normally.")
+    print("After enabling the plugin, manage it in `hermes dashboard` → B1ack Dream.")
     return 0
 
 

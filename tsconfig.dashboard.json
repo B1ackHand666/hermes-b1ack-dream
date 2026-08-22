@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "None",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "skipLibCheck": true,
+    "outFile": "./plugins/hermes/dashboard/dist/index.js",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "files": ["src/dashboard/index.ts"]
+}

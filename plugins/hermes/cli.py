@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import webbrowser
 from pathlib import Path
+
+from .runtime_state import runtime_status
 
 
 def _home() -> Path:
@@ -17,33 +18,45 @@ def _home() -> Path:
 
 
 def command(args) -> None:
-    data_dir = _home() / "b1ack-dream"
+    hermes_home = _home()
+    data_dir = hermes_home / "b1ack-dream"
     subcommand = getattr(args, "b1ack_dream_command", None) or "status"
     if subcommand == "status":
         config = data_dir / "config.json"
-        runtime = data_dir / "runtime.json"
         print(f"B1ack Dream data: {data_dir}")
         print(f"Configuration: {'configured' if config.exists() else 'defaults (run hermes memory setup)'}")
-        if runtime.exists():
-            state = json.loads(runtime.read_text(encoding="utf-8"))
-            print(f"WebUI: {state.get('web_ui') or 'disabled'}")
+        status = runtime_status(hermes_home, repair_stale=True)
+        if status["running"]:
+            web = status["web_ui"]
+            print("Provider runtime: running")
+            if status["standalone_web_ui_enabled"]:
+                print(f"WebUI: http://{web['host']}:{web['port']}")
+            else:
+                print("WebUI: standalone fallback disabled (Hermes Dashboard remains available)")
         else:
-            print("WebUI: start Hermes with b1ack-dream enabled first")
+            print("Provider runtime: stopped")
+            print("WebUI: B1ack Dream WebUI is not running.")
+            print(f"Reason: {status['reason']}")
+        dashboard = hermes_home / "plugins" / "b1ack-dream" / "dashboard" / "manifest.json"
+        print(f"Dashboard plugin: {'installed' if dashboard.is_file() else 'not installed'}")
+        print("Tip: B1ack Dream is also available directly in `hermes dashboard` when the plugin is enabled.")
         return
     if subcommand == "ui":
-        runtime = data_dir / "runtime.json"
-        if not runtime.exists():
+        status = runtime_status(hermes_home, repair_stale=True)
+        web = status.get("web_ui")
+        if not status["running"] or not isinstance(web, dict):
             print("B1ack Dream WebUI is not running. Start Hermes with b1ack-dream enabled.")
             return
-        state = json.loads(runtime.read_text(encoding="utf-8"))
-        web = state.get("web_ui") or {}
-        url = f"http://{web.get('host', '127.0.0.1')}:{web.get('port')}"
+        if not status["standalone_web_ui_enabled"]:
+            print("B1ack Dream standalone WebUI is disabled. Open `hermes dashboard` → B1ack Dream instead.")
+            return
+        url = f"http://{web['host']}:{web['port']}"
         print(url)
         if getattr(args, "open", False):
             webbrowser.open(url)
         return
     if subcommand == "dream":
-        print("Dream runs automatically at primary-session end. Use the WebUI for a manual Dream while Hermes is running.")
+        print("Dream runs at primary-session end and on its configured timer while the provider is running. Use Hermes Dashboard or the standalone WebUI for a manual Dream.")
 
 
 def register_cli(subparser) -> None:
